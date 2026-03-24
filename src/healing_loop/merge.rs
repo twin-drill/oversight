@@ -20,7 +20,7 @@ pub fn apply_merges(
     outcomes: &[MergeOutcome],
     context_id: u64,
 ) -> Result<MergeResult> {
-    validate_create_outcomes(outcomes)?;
+    let outcomes = coalesce_creates(outcomes);
 
     let mut result = MergeResult {
         topics_created: 0,
@@ -28,7 +28,7 @@ pub fn apply_merges(
         duplicates_skipped: 0,
     };
 
-    for outcome in outcomes {
+    for outcome in &outcomes {
         match outcome {
             MergeOutcome::CreateTopic { learning } => {
                 create_topic_from_learning(service, learning, context_id)?;
@@ -50,21 +50,59 @@ pub fn apply_merges(
     Ok(result)
 }
 
-fn validate_create_outcomes(outcomes: &[MergeOutcome]) -> Result<()> {
-    let mut seen_slugs = std::collections::HashSet::new();
+/// When multiple CreateTopic outcomes target the same slug, merge them into
+/// one create (first learning) plus appends (subsequent learnings).
+fn coalesce_creates(outcomes: &[MergeOutcome]) -> Vec<MergeOutcome> {
+    let mut slug_order: Vec<String> = Vec::new();
+    let mut create_groups: std::collections::HashMap<String, Vec<&Learning>> =
+        std::collections::HashMap::new();
+    let mut result: Vec<MergeOutcome> = Vec::new();
 
     for outcome in outcomes {
-        if let MergeOutcome::CreateTopic { learning } = outcome {
-            let topic_slug = slug::normalize(&learning.topic_hint);
-            if !seen_slugs.insert(topic_slug.clone()) {
-                return Err(crate::error::Error::MergeConflict(format!(
-                    "multiple create outcomes target slug '{topic_slug}'"
-                )));
+        match outcome {
+            MergeOutcome::CreateTopic { learning } => {
+                let topic_slug = slug::normalize(&learning.topic_hint);
+                let group = create_groups.entry(topic_slug.clone()).or_default();
+                if group.is_empty() {
+                    slug_order.push(topic_slug);
+                }
+                group.push(learning);
             }
+            other => result.push(other.clone()),
         }
     }
 
-    Ok(())
+    for topic_slug in &slug_order {
+        let learnings = &create_groups[topic_slug];
+        let first = learnings[0];
+
+        if learnings.len() == 1 {
+            result.push(MergeOutcome::CreateTopic {
+                learning: first.clone(),
+            });
+        } else {
+            let mut merged = first.clone();
+            for extra in &learnings[1..] {
+                merged.summary.push_str("\n\n");
+                merged.summary.push_str(&extra.title);
+                merged.summary.push_str(": ");
+                merged.summary.push_str(&extra.summary);
+                for ev in &extra.evidence {
+                    if !merged.evidence.contains(ev) {
+                        merged.evidence.push(ev.clone());
+                    }
+                }
+                for tag in &extra.tags {
+                    if !merged.tags.iter().any(|t| t.to_lowercase() == tag.to_lowercase()) {
+                        merged.tags.push(tag.clone());
+                    }
+                }
+            }
+            result.push(MergeOutcome::CreateTopic { learning: merged });
+        }
+    }
+
+    result
 }
 
 /// Create a new KB topic from a learning.

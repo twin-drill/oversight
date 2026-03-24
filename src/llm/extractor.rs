@@ -50,21 +50,30 @@ impl Learning {
 }
 
 /// The system prompt for the extraction LLM call.
-const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are an expert knowledge extractor for developer tooling. You analyze conversation transcripts between a developer and an AI coding assistant, and extract actionable tool knowledge.
+const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a knowledge extractor that finds environment-specific quirks and non-obvious fixes from conversations between a developer and an AI coding assistant.
 
-Focus on:
-- Tool error-recovery patterns (a command failed, then succeeded after a fix)
-- Configuration discoveries (environment variables, config files, flags)
-- Usage patterns for CLI tools, APIs, and dev infrastructure
-- Workarounds for known issues
+You are looking for things a skilled developer would NOT already know — surprises, gotchas, and workarounds specific to THIS user's machine, project, or infrastructure.
+
+Extract:
+- Error-recovery sequences: a command failed due to a non-obvious reason, and the fix was specific to the user's setup (e.g., an env var that shadows auth, a port conflict, a version mismatch)
+- Project-specific configuration: flags, env vars, config overrides, or file paths that are unique to this codebase or environment — not standard tool usage
+- Workarounds for broken or surprising behavior: things that shouldn't be necessary but are (e.g., "must unset X before running Y", "need --legacy-peer-deps because of Z")
+- Infrastructure quirks: CI pipeline ordering issues, deploy steps with undocumented dependencies, service startup ordering
+
+Do NOT extract:
+- How standard tools work (e.g., "cargo test runs tests", "git push pushes to remote")
+- Generic best practices any developer would know
+- The existence or basic usage of a tool (e.g., "Docker Compose is used for container orchestration")
+- Descriptions of what a project is or how its code is structured
+- Learnings about the AI assistant itself or its capabilities
 
 Rules:
-- Only extract concrete, actionable learnings. Skip vague observations.
-- Each learning should be self-contained and useful to a future developer.
-- Set confidence between 0.0 and 1.0 based on how clearly the evidence supports the learning.
-- The topic_hint should be a short kebab-case identifier (e.g., "gh-cli", "docker-compose", "aws-sso").
+- Only extract concrete, actionable learnings that would save time if encountered again.
+- Each learning must describe a SPECIFIC fix, workaround, or gotcha — not general knowledge.
+- Set confidence between 0.0 and 1.0. Use 0.9+ only when the transcript shows a clear failure-then-fix sequence.
+- The topic_hint should be a short kebab-case identifier for the tool or system involved (e.g., "gh-cli", "docker-compose", "aws-sso").
 - Evidence should be brief excerpts or paraphrases, NOT raw tool output.
-- If there are no tool-related learnings in the transcript, return an empty learnings array.
+- If nothing in the transcript is surprising or environment-specific, return an empty learnings array. An empty array is the correct answer for most conversations.
 
 You MUST respond with valid JSON matching this exact schema:
 {

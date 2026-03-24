@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Oversight setup script
-# Builds the binary, initializes the KB, injects oversight instructions
-# into Claude Code config files, and starts the healing loop daemon.
-
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="${HOME}/.local/bin"
 OVERSIGHT_BIN="${INSTALL_DIR}/oversight"
+OVERSIGHT_DIR="${HOME}/.oversight"
+ENV_FILE="${OVERSIGHT_DIR}/env"
 PLIST_LABEL="com.twin-drill.oversight"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 SYSTEMD_UNIT="oversight.service"
@@ -48,7 +46,6 @@ cp -f "${REPO_DIR}/target/release/oversight" "$OVERSIGHT_BIN"
 chmod +x "$OVERSIGHT_BIN"
 ok "Installed ${OVERSIGHT_BIN}"
 
-# Check PATH
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     warn "${INSTALL_DIR} is not in your PATH"
     warn "Add this to your shell profile:"
@@ -74,7 +71,7 @@ ok "Keys found:${FOUND_KEYS}"
 
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     LLM_PROVIDER="anthropic"
-    LLM_MODEL="claude-sonnet-4-latest"
+    LLM_MODEL="claude-sonnet-4-6"
 elif [ -n "${OPENAI_API_KEY:-}" ]; then
     LLM_PROVIDER="openai"
     LLM_MODEL="gpt-4o-mini"
@@ -85,18 +82,16 @@ fi
 
 ok "Selected provider: ${LLM_PROVIDER} (${LLM_MODEL})"
 
-# ─── Step 4: Initialize KB and write config ───────────────────────
+# ─── Step 4: Initialize KB, write config, and store keys ─────────
 
 info "Initializing knowledge base"
 "$OVERSIGHT_BIN" init
 ok "KB initialized at ~/.oversight/kb/"
 
-# Write config with detected provider
-CONFIG_DIR="${HOME}/.oversight"
-CONFIG_FILE="${CONFIG_DIR}/config.toml"
-mkdir -p "$CONFIG_DIR"
+CONFIG_FILE="${OVERSIGHT_DIR}/config.toml"
+mkdir -p "$OVERSIGHT_DIR"
 cat > "$CONFIG_FILE" <<EOF
-kb_path = "${CONFIG_DIR}/kb"
+kb_path = "${OVERSIGHT_DIR}/kb"
 
 [llm]
 provider = "${LLM_PROVIDER}"
@@ -109,6 +104,14 @@ confidence_threshold = 0.7
 EOF
 ok "Config written to ${CONFIG_FILE} (provider: ${LLM_PROVIDER})"
 
+# Write API keys to a private env file (mode 600)
+: > "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+[ -n "${ANTHROPIC_API_KEY:-}" ] && echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "$ENV_FILE"
+[ -n "${OPENAI_API_KEY:-}" ]    && echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> "$ENV_FILE"
+[ -n "${GEMINI_API_KEY:-}" ]    && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> "$ENV_FILE"
+ok "API keys stored in ${ENV_FILE} (mode 600)"
+
 # ─── Step 5: Integrate with Claude Code ──────────────────────────
 
 info "Injecting oversight into ~/.claude/CLAUDE.md"
@@ -118,6 +121,17 @@ ok "Managed block installed in CLAUDE.md"
 # ─── Step 6: Install and start healing loop daemon ───────────────
 
 info "Installing healing loop daemon"
+
+# Wrapper script that sources the env file before starting the daemon
+WRAPPER="${OVERSIGHT_DIR}/start-daemon.sh"
+cat > "$WRAPPER" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE="${HOME}/.oversight/env"
+[ -f "$ENV_FILE" ] && set -a && . "$ENV_FILE" && set +a
+exec oversight loop start
+WEOF
+chmod 700 "$WRAPPER"
 
 if is_macos; then
     mkdir -p "$(dirname "$PLIST_PATH")"
@@ -130,18 +144,16 @@ if is_macos; then
     <string>${PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${OVERSIGHT_BIN}</string>
-        <string>loop</string>
-        <string>start</string>
+        <string>${WRAPPER}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${HOME}/.oversight/daemon.log</string>
+    <string>${OVERSIGHT_DIR}/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>${HOME}/.oversight/daemon.log</string>
+    <string>${OVERSIGHT_DIR}/daemon.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -163,7 +175,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=${OVERSIGHT_BIN} loop start
+ExecStart=${WRAPPER}
 Restart=on-failure
 RestartSec=30
 Environment=PATH=${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin
@@ -187,13 +199,10 @@ info "Setup complete"
 echo ""
 echo "  oversight binary:  ${OVERSIGHT_BIN}"
 echo "  knowledge base:    ~/.oversight/kb/"
+echo "  API keys:          ~/.oversight/env (mode 600)"
 echo "  healing loop:      running as background service"
 echo "  daemon log:        ~/.oversight/daemon.log"
 echo "  CLAUDE.md:         ~/.claude/CLAUDE.md (managed block injected)"
 echo ""
-echo "  Useful commands:"
-echo "    oversight topics              # list KB topics"
-echo "    oversight search <query>      # search KB"
-echo "    oversight loop status         # check loop state"
-echo "    oversight integrate status    # check integration health"
+echo "  The daemon will process your existing sessions over the next few hours."
 echo ""

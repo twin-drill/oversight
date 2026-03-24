@@ -83,7 +83,7 @@ if [ -d "$OVERSIGHT_DIR" ]; then
         ok "Deleted ${OVERSIGHT_DIR}"
     else
         echo ""
-        printf '\033[1;33m  ?\033[0m Delete %s (KB, config, state)? [y/N] ' "$OVERSIGHT_DIR"
+        printf '\033[1;33m  ?\033[0m Delete %s (KB, config, API keys, state)? [y/N] ' "$OVERSIGHT_DIR"
         read -r answer
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
             rm -rf "$OVERSIGHT_DIR"

@@ -33,7 +33,7 @@ impl LlmProvider {
 
     pub fn default_model(&self) -> &'static str {
         match self {
-            LlmProvider::Anthropic => "claude-sonnet-4-latest",
+            LlmProvider::Anthropic => "claude-sonnet-4-6",
             LlmProvider::OpenAI => "gpt-4o-mini",
             LlmProvider::Gemini => "gemini-2.0-flash",
         }
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_provider_defaults() {
-        assert_eq!(LlmProvider::Anthropic.default_model(), "claude-sonnet-4-latest");
+        assert_eq!(LlmProvider::Anthropic.default_model(), "claude-sonnet-4-6");
         assert_eq!(LlmProvider::OpenAI.default_model(), "gpt-4o-mini");
         assert_eq!(LlmProvider::Gemini.default_model(), "gemini-2.0-flash");
     }

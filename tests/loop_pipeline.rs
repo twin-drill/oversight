@@ -212,7 +212,7 @@ fn test_merge_provenance_metadata() {
 }
 
 #[test]
-fn test_merge_duplicate_create_slug_fails_before_writing() {
+fn test_merge_duplicate_create_slug_coalesces() {
     let (_dir, service) = setup_kb();
     let outcomes = vec![
         MergeOutcome::CreateTopic {
@@ -223,9 +223,13 @@ fn test_merge_duplicate_create_slug_fails_before_writing() {
         },
     ];
 
-    let err = merge::apply_merges(&service, &outcomes, 555).unwrap_err();
-    assert!(err.to_string().contains("multiple create outcomes"));
-    assert!(service.get_topic("shared-hint").is_err());
+    let result = merge::apply_merges(&service, &outcomes, 555).unwrap();
+    assert_eq!(result.topics_created, 1);
+
+    let topic = service.get_topic("shared-hint").unwrap();
+    assert!(topic.body.contains("First summary."));
+    assert!(topic.body.contains("Second"));
+    assert!(topic.body.contains("Second summary."));
 }
 
 // -- Dry run tests --
