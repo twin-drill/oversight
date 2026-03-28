@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::healing_loop::patterns::PatternConfig;
 use crate::healing_loop::policy::{DedupePolicy, Regime};
 use crate::llm::client::LlmProvider;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,9 @@ pub struct LoopConfig {
     /// Optional dedupe threshold overrides applied on top of the regime preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe: Option<DedupeConfig>,
+    /// Cross-conversation pattern detection settings.
+    #[serde(default)]
+    pub patterns: PatternConfig,
 }
 
 fn default_context_limit() -> u32 {
@@ -68,6 +72,7 @@ impl Default for LoopConfig {
             max_transcript_len: default_max_transcript_len(),
             regime: Regime::default(),
             dedupe: None,
+            patterns: PatternConfig::default(),
         }
     }
 }
@@ -124,25 +129,6 @@ impl Default for LlmConfig {
     }
 }
 
-/// Configuration for the integration layer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntegrateConfig {
-    /// Maximum number of topics shown in the managed block preview.
-    #[serde(default = "default_topic_preview_limit")]
-    pub topic_preview_limit: usize,
-}
-
-fn default_topic_preview_limit() -> usize {
-    20
-}
-
-impl Default for IntegrateConfig {
-    fn default() -> Self {
-        IntegrateConfig {
-            topic_preview_limit: default_topic_preview_limit(),
-        }
-    }
-}
 
 /// Global configuration for the oversight system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,9 +140,6 @@ pub struct Config {
     pub loop_config: LoopConfig,
     #[serde(default)]
     pub llm: LlmConfig,
-    /// Integration layer configuration.
-    #[serde(default)]
-    pub integrate: IntegrateConfig,
 }
 
 impl Default for Config {
@@ -166,7 +149,6 @@ impl Default for Config {
             kb_path: home.join(".oversight").join("kb"),
             loop_config: LoopConfig::default(),
             llm: LlmConfig::default(),
-            integrate: IntegrateConfig::default(),
         }
     }
 }
@@ -247,6 +229,20 @@ impl Config {
                     title_match_mode: dedupe_cfg.title_match_mode,
                 });
             }
+            if let Some(pat_cfg) = loop_cfg.patterns {
+                if let Some(enabled) = pat_cfg.enabled {
+                    config.loop_config.patterns.enabled = enabled;
+                }
+                if let Some(threshold) = pat_cfg.similarity_threshold {
+                    config.loop_config.patterns.similarity_threshold = threshold;
+                }
+                if let Some(min_occ) = pat_cfg.min_occurrences {
+                    config.loop_config.patterns.min_occurrences = min_occ;
+                }
+                if let Some(max_clusters) = pat_cfg.max_clusters_per_pass {
+                    config.loop_config.patterns.max_clusters_per_pass = max_clusters;
+                }
+            }
         }
         if let Some(llm_cfg) = file_config.llm {
             let mut provider_changed = false;
@@ -261,11 +257,6 @@ impl Config {
             }
             if let Some(max_tokens) = llm_cfg.max_tokens {
                 config.llm.max_tokens = max_tokens;
-            }
-        }
-        if let Some(integrate) = file_config.integrate {
-            if let Some(limit) = integrate.topic_preview_limit {
-                config.integrate.topic_preview_limit = limit;
             }
         }
         Ok(config)
@@ -287,14 +278,17 @@ impl Config {
                     require_slug_affinity: d.require_slug_affinity,
                     title_match_mode: d.title_match_mode.clone(),
                 }),
+                patterns: Some(FilePatternConfig {
+                    enabled: Some(self.loop_config.patterns.enabled),
+                    similarity_threshold: Some(self.loop_config.patterns.similarity_threshold),
+                    min_occurrences: Some(self.loop_config.patterns.min_occurrences),
+                    max_clusters_per_pass: Some(self.loop_config.patterns.max_clusters_per_pass),
+                }),
             }),
             llm: Some(FileLlmConfig {
                 provider: Some(self.llm.provider),
                 model: Some(self.llm.model.clone()),
                 max_tokens: Some(self.llm.max_tokens),
-            }),
-            integrate: Some(FileIntegrateConfig {
-                topic_preview_limit: Some(self.integrate.topic_preview_limit),
             }),
         };
         let contents = toml::to_string_pretty(&file_config)?;
@@ -327,7 +321,7 @@ impl Config {
     /// Build the transcript source based on config.
     ///
     /// Defaults to Claude Code local logs. Set `OVERSIGHT_SOURCE` to
-    /// `codex` or `gemini` to use other providers.
+    /// `codex`, `crush`, or `gemini` to use other providers.
     pub fn build_source(&self) -> crate::source::TranscriptSource {
         let source_env = std::env::var("OVERSIGHT_SOURCE")
             .unwrap_or_default()
@@ -339,9 +333,19 @@ impl Config {
                     crate::source::providers::codex::CodexSource::default_sessions_dir(),
                 ),
             ),
+            "crush" => crate::source::TranscriptSource::Crush(
+                crate::source::providers::crush::CrushSource::new(
+                    crate::source::providers::crush::CrushSource::default_projects_json(),
+                ),
+            ),
             "gemini" => crate::source::TranscriptSource::Gemini(
                 crate::source::providers::gemini::GeminiSource::new(
                     crate::source::providers::gemini::GeminiSource::default_tmp_dir(),
+                ),
+            ),
+            "opencode" => crate::source::TranscriptSource::OpenCode(
+                crate::source::providers::opencode::OpenCodeSource::new(
+                    crate::source::providers::opencode::OpenCodeSource::default_config_dir(),
                 ),
             ),
             _ => crate::source::TranscriptSource::ClaudeCode(
@@ -361,8 +365,6 @@ struct FileConfig {
     loop_config: Option<FileLoopConfig>,
     #[serde(default)]
     llm: Option<FileLlmConfig>,
-    #[serde(default)]
-    integrate: Option<FileIntegrateConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -374,6 +376,8 @@ struct FileLoopConfig {
     regime: Option<Regime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dedupe: Option<FileDedupeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    patterns: Option<FilePatternConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -392,9 +396,13 @@ struct FileLlmConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct FileIntegrateConfig {
-    topic_preview_limit: Option<usize>,
+struct FilePatternConfig {
+    enabled: Option<bool>,
+    similarity_threshold: Option<f64>,
+    min_occurrences: Option<usize>,
+    max_clusters_per_pass: Option<usize>,
 }
+
 
 /// Return the user's home directory, falling back to "." if unavailable.
 fn home_dir() -> PathBuf {

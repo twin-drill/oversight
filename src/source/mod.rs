@@ -5,15 +5,20 @@ use types::{ContextSummary, TypedTurn};
 use crate::error::Result;
 use crate::healing_loop::discovery::Candidate;
 use crate::state::LoopState;
+use std::path::PathBuf;
 
 use providers::claude_code::ClaudeCodeSource;
 use providers::codex::CodexSource;
+use providers::crush::CrushSource;
 use providers::gemini::GeminiSource;
+use providers::opencode::OpenCodeSource;
 
 pub enum TranscriptSource {
     ClaudeCode(ClaudeCodeSource),
     Codex(CodexSource),
+    Crush(CrushSource),
     Gemini(GeminiSource),
+    OpenCode(OpenCodeSource),
 }
 
 impl TranscriptSource {
@@ -25,7 +30,9 @@ impl TranscriptSource {
         match self {
             TranscriptSource::ClaudeCode(src) => src.discover_candidates(state, limit),
             TranscriptSource::Codex(src) => src.discover_candidates(state, limit),
+            TranscriptSource::Crush(src) => src.discover_candidates(state, limit),
             TranscriptSource::Gemini(src) => src.discover_candidates(state, limit),
+            TranscriptSource::OpenCode(src) => src.discover_candidates(state, limit),
         }
     }
 
@@ -33,7 +40,9 @@ impl TranscriptSource {
         match self {
             TranscriptSource::ClaudeCode(src) => src.get_turns(candidate),
             TranscriptSource::Codex(src) => src.get_turns(candidate),
+            TranscriptSource::Crush(src) => src.get_turns(candidate),
             TranscriptSource::Gemini(src) => src.get_turns(candidate),
+            TranscriptSource::OpenCode(src) => src.get_turns(candidate),
         }
     }
 
@@ -41,7 +50,29 @@ impl TranscriptSource {
         match self {
             TranscriptSource::ClaudeCode(_) => "claude-code",
             TranscriptSource::Codex(_) => "codex",
+            TranscriptSource::Crush(_) => "crush",
             TranscriptSource::Gemini(_) => "gemini",
+            TranscriptSource::OpenCode(_) => "opencode",
+        }
+    }
+
+    /// Return directories/files to watch for filesystem change notification.
+    ///
+    /// These are the root paths where the provider stores conversation data.
+    /// The watcher should use recursive mode on directories.
+    pub fn watch_paths(&self) -> Vec<PathBuf> {
+        match self {
+            TranscriptSource::ClaudeCode(src) => vec![src.root_dir().to_path_buf()],
+            TranscriptSource::Codex(src) => vec![src.root_dir().to_path_buf()],
+            TranscriptSource::Crush(src) => {
+                let mut paths = vec![src.manifest_path().to_path_buf()];
+                if let Ok(db_dirs) = src.database_dirs() {
+                    paths.extend(db_dirs);
+                }
+                paths
+            }
+            TranscriptSource::Gemini(src) => vec![src.root_dir().to_path_buf()],
+            TranscriptSource::OpenCode(src) => src.database_paths(),
         }
     }
 }

@@ -123,6 +123,12 @@ fn create_topic_from_learning(
     topic.source_context_id = Some(context_id);
     topic.extracted_at = Some(now);
 
+    if let Some(ref project) = learning.project_path {
+        if !topic.projects.contains(project) {
+            topic.projects.push(project.clone());
+        }
+    }
+
     service.create_topic(&topic)?;
     Ok(())
 }
@@ -154,6 +160,12 @@ fn append_insight_to_topic(
     // Update provenance to reflect most recent extraction
     updated.source_context_id = Some(context_id);
     updated.extracted_at = Some(now);
+
+    if let Some(ref project) = learning.project_path {
+        if !updated.projects.contains(project) {
+            updated.projects.push(project.clone());
+        }
+    }
 
     service.upsert_topic(&updated)?;
     Ok(())
@@ -285,6 +297,7 @@ mod tests {
             evidence: vec!["gh auth failed".into(), "after unset, it worked".into()],
             tags: vec!["cli".into()],
             confidence: 0.9,
+            project_path: None,
         };
 
         let body = format_new_topic_body(&learning);
@@ -329,6 +342,7 @@ mod tests {
             evidence: vec![],
             tags: vec![],
             confidence: 0.9,
+            project_path: None,
         };
         let learning2 = learning1.clone();
         let learning3 = learning1.clone();
@@ -365,6 +379,7 @@ mod tests {
             evidence: vec!["saw this happen".into()],
             tags: vec![],
             confidence: 0.8,
+            project_path: None,
         };
 
         let section = format_insight_section(&learning, 42);

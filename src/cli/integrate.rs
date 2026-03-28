@@ -2,7 +2,6 @@ use clap::Subcommand;
 use oversight::config::Config;
 use oversight::integrate::manager;
 use oversight::integrate::targets;
-use oversight::KBService;
 use std::path::PathBuf;
 
 /// Default target identifier when none is specified.
@@ -76,7 +75,7 @@ pub fn run_integrate_command(
     }
 }
 
-fn cmd_install(config: &Config, target_id: &str, path_override: Option<&std::path::Path>, dry_run: bool) -> i32 {
+fn cmd_install(_config: &Config, target_id: &str, path_override: Option<&std::path::Path>, dry_run: bool) -> i32 {
     let target = match targets::resolve_target(target_id) {
         Ok(t) => t,
         Err(e) => {
@@ -85,16 +84,7 @@ fn cmd_install(config: &Config, target_id: &str, path_override: Option<&std::pat
         }
     };
 
-    let topics = match load_topics_or_empty(config) {
-        Ok(topics) => topics,
-        Err(e) => {
-            eprintln!("Error loading topics: {e}");
-            return 1;
-        }
-    };
-    let preview_limit = config.integrate.topic_preview_limit;
-
-    match manager::install(&target, path_override, &topics, Some(preview_limit), dry_run) {
+    match manager::install(&target, path_override, dry_run) {
         Ok(result) => {
             println!("{}: {}", result.path.display(), result.action);
             0
@@ -106,16 +96,7 @@ fn cmd_install(config: &Config, target_id: &str, path_override: Option<&std::pat
     }
 }
 
-fn cmd_refresh(config: &Config, target_id: Option<&str>, path_override: Option<&std::path::Path>, dry_run: bool) -> i32 {
-    let topics = match load_topics_or_empty(config) {
-        Ok(topics) => topics,
-        Err(e) => {
-            eprintln!("Error loading topics: {e}");
-            return 1;
-        }
-    };
-    let preview_limit = config.integrate.topic_preview_limit;
-
+fn cmd_refresh(_config: &Config, target_id: Option<&str>, path_override: Option<&std::path::Path>, dry_run: bool) -> i32 {
     let target_ids: Vec<&str> = match target_id {
         Some(id) => vec![id],
         None => vec!["claude-code"],
@@ -132,7 +113,7 @@ fn cmd_refresh(config: &Config, target_id: Option<&str>, path_override: Option<&
             }
         };
 
-        match manager::refresh(&target, path_override, &topics, Some(preview_limit), dry_run) {
+        match manager::refresh(&target, path_override, dry_run) {
             Ok(result) => {
                 println!("{}: {}", result.path.display(), result.action);
             }
@@ -180,13 +161,4 @@ fn cmd_status() -> i32 {
         }
     }
     0
-}
-
-/// Load topics from KB, returning empty vec if KB is not initialized.
-fn load_topics_or_empty(config: &Config) -> oversight::error::Result<Vec<oversight::TopicSummary>> {
-    let service = KBService::new(config.clone());
-    if !service.is_initialized() {
-        return Ok(Vec::new());
-    }
-    service.list_topics()
 }

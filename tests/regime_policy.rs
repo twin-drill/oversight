@@ -29,6 +29,7 @@ fn make_learning(hint: &str, title: &str, summary: &str, tags: &[&str]) -> Learn
         evidence: vec!["test evidence".to_string()],
         tags: tags.iter().map(|s| s.to_string()).collect(),
         confidence: 0.9,
+        project_path: None,
     }
 }
 
@@ -168,17 +169,17 @@ fn test_balanced_matches_pre_regime_behavior() {
         outcomes[3].summary()
     );
 
-    // L4: 2 tag overlap with aws-sso but require_slug_affinity=true, slugs unrelated -> CreateTopic
+    // L4: tags {aws, auth} vs aws-sso {aws, sso, auth} — Jaccard 2/3=0.67 >= 0.5 -> AppendInsight
     assert!(
-        matches!(&outcomes[4], MergeOutcome::CreateTopic { .. }),
-        "L4: Expected CreateTopic under balanced (slug affinity blocks tag match), got: {}",
+        matches!(&outcomes[4], MergeOutcome::AppendInsight { .. }),
+        "L4: Expected AppendInsight under balanced (tag Jaccard match), got: {}",
         outcomes[4].summary()
     );
 
-    // L5: 2 tag overlap with gh-cli but require_slug_affinity=true, slugs unrelated -> CreateTopic
+    // L5: tags {cli, github} vs gh-cli {cli, github, auth} — Jaccard 2/3=0.67 >= 0.5 -> AppendInsight
     assert!(
-        matches!(&outcomes[5], MergeOutcome::CreateTopic { .. }),
-        "L5: Expected CreateTopic under balanced (slug affinity blocks tag match), got: {}",
+        matches!(&outcomes[5], MergeOutcome::AppendInsight { .. }),
+        "L5: Expected AppendInsight under balanced (tag Jaccard match), got: {}",
         outcomes[5].summary()
     );
 }
@@ -248,7 +249,34 @@ fn test_aggressive_creates_more_than_balanced() {
 
 #[test]
 fn test_conservative_creates_fewer_than_balanced() {
-    let (topics, learnings) = fixture();
+    // Topic with 4 tags
+    let topics = vec![make_topic(
+        "deploy-pipeline",
+        "Deploy Pipeline",
+        &[],
+        &["ci", "deploy", "aws", "docker"],
+        "# Deploy\n\nPipeline details.\n",
+    )];
+
+    let learnings = vec![
+        // 1 tag overlap (ci) out of union of 6 -> Jaccard 1/6=0.17
+        // Neither balanced nor conservative catches this -> CreateTopic (both)
+        make_learning(
+            "ci-config",
+            "CI config",
+            "CI config for tests.",
+            &["ci", "testing", "github-actions"],
+        ),
+        // 2 tag overlap (ci, aws) out of union of 5 -> Jaccard 2/5=0.4
+        // Conservative (0.35): match -> AppendInsight
+        // Balanced (0.5): no match -> CreateTopic
+        make_learning(
+            "cloud-deploy",
+            "Cloud deployment",
+            "Deploy to cloud infra.",
+            &["ci", "aws", "terraform"],
+        ),
+    ];
 
     let balanced_outcomes = dedupe::deduplicate(&learnings, &topics, &DedupePolicy::balanced());
     let conservative_outcomes =
@@ -263,34 +291,26 @@ fn test_conservative_creates_fewer_than_balanced() {
         con_creates,
         bal_creates
     );
+}
 
-    // Under conservative: tag_overlap_minimum=1 and require_slug_affinity=false
-    // so L4 (aws-credentials, tags: aws, auth) matches aws-sso (tags: aws, sso, auth)
-    // with 2 overlapping tags (>= 1), no slug affinity required -> AppendInsight
+// Balanced L4/L5 now match via tag Jaccard — verify the old assertions are updated
+#[test]
+fn test_balanced_catches_semantic_duplicates_via_tag_jaccard() {
+    let (topics, learnings) = fixture();
+    let outcomes = dedupe::deduplicate(&learnings, &topics, &DedupePolicy::balanced());
+
+    // L4: aws-credentials {aws, auth} vs aws-sso {aws, sso, auth} -> Jaccard 0.67
     assert!(
-        matches!(&conservative_outcomes[4], MergeOutcome::AppendInsight { .. }),
-        "L4 under conservative: Expected AppendInsight (tag match without slug affinity), got: {}",
-        conservative_outcomes[4].summary()
+        matches!(&outcomes[4], MergeOutcome::AppendInsight { .. }),
+        "L4 should match aws-sso via tag Jaccard, got: {}",
+        outcomes[4].summary()
     );
 
-    // L5 (npm-auth, tags: cli, github) matches gh-cli (tags: cli, github, auth)
-    // with 2 overlapping tags (>= 1), no slug affinity required -> AppendInsight
+    // L5: npm-auth {cli, github} vs gh-cli {cli, github, auth} -> Jaccard 0.67
     assert!(
-        matches!(&conservative_outcomes[5], MergeOutcome::AppendInsight { .. }),
-        "L5 under conservative: Expected AppendInsight (tag match without slug affinity), got: {}",
-        conservative_outcomes[5].summary()
-    );
-
-    // Balanced should have L4 and L5 as CreateTopic (slug affinity blocks tag match)
-    assert!(
-        matches!(&balanced_outcomes[4], MergeOutcome::CreateTopic { .. }),
-        "L4 under balanced: Expected CreateTopic, got: {}",
-        balanced_outcomes[4].summary()
-    );
-    assert!(
-        matches!(&balanced_outcomes[5], MergeOutcome::CreateTopic { .. }),
-        "L5 under balanced: Expected CreateTopic, got: {}",
-        balanced_outcomes[5].summary()
+        matches!(&outcomes[5], MergeOutcome::AppendInsight { .. }),
+        "L5 should match gh-cli via tag Jaccard, got: {}",
+        outcomes[5].summary()
     );
 }
 

@@ -10,6 +10,8 @@ pub struct Candidate {
     pub head_turn_id: u64,
     /// Path to the source file, cached from discovery to avoid re-scanning.
     pub source_path: Option<PathBuf>,
+    /// The project directory this conversation took place in.
+    pub project_path: Option<String>,
 }
 
 pub fn filter_candidates(contexts: Vec<ContextSummary>, state: &LoopState) -> Vec<Candidate> {
@@ -27,6 +29,7 @@ pub fn filter_candidates(contexts: Vec<ContextSummary>, state: &LoopState) -> Ve
                 context: ctx,
                 head_turn_id,
                 source_path: None,
+                project_path: None,
             })
         })
         .collect()

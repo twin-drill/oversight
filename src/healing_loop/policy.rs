@@ -84,6 +84,9 @@ pub struct DedupePolicy {
     pub require_slug_affinity: bool,
     /// How titles are compared for matching.
     pub title_match_mode: TitleMatchMode,
+    /// Minimum tag Jaccard similarity for semantic duplicate detection (0.0-1.0).
+    /// Set to 1.0 to disable.
+    pub tag_jaccard_threshold: f64,
 }
 
 impl Default for DedupePolicy {
@@ -101,6 +104,7 @@ impl DedupePolicy {
             tag_overlap_minimum: 3,
             require_slug_affinity: true,
             title_match_mode: TitleMatchMode::Exact,
+            tag_jaccard_threshold: 1.0,
         }
     }
 
@@ -112,6 +116,7 @@ impl DedupePolicy {
             tag_overlap_minimum: 2,
             require_slug_affinity: true,
             title_match_mode: TitleMatchMode::Contains,
+            tag_jaccard_threshold: 0.5,
         }
     }
 
@@ -123,6 +128,7 @@ impl DedupePolicy {
             tag_overlap_minimum: 1,
             require_slug_affinity: false,
             title_match_mode: TitleMatchMode::FuzzyTokenJaccard { min_similarity: 0.5 },
+            tag_jaccard_threshold: 0.35,
         }
     }
 

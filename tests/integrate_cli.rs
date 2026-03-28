@@ -56,7 +56,7 @@ fn test_cli_integrate_install_creates_file() {
     assert!(target_path.exists());
     let content = fs::read_to_string(&target_path).unwrap();
     assert!(content.contains("oversight:begin target=claude-code"));
-    assert!(content.contains("gh-cli"));
+    assert!(content.contains("oversight topics"));
     assert!(content.contains("oversight:end"));
 }
 
@@ -113,7 +113,7 @@ fn test_cli_integrate_install_empty_kb() {
         .success();
 
     let content = fs::read_to_string(&target_path).unwrap();
-    assert!(content.contains("No topics yet"));
+    assert!(content.contains("oversight topics"));
 }
 
 #[test]
@@ -179,8 +179,7 @@ fn test_cli_integrate_refresh_updates_topics() {
         .success();
 
     let content = fs::read_to_string(&target_path).unwrap();
-    assert!(content.contains("aws-sso"), "Refreshed block should contain new topic");
-    assert!(content.contains("gh-cli"), "Refreshed block should still contain original topic");
+    assert!(content.contains("oversight topics"));
 }
 
 // --- Remove tests ---

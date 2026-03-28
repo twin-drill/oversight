@@ -24,6 +24,9 @@ pub struct Topic {
     /// Timestamp when this was extracted by the healing loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extracted_at: Option<DateTime<Utc>>,
+    /// Project directories this topic has been observed in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
     /// The markdown body content (not part of frontmatter).
     #[serde(skip)]
     pub body: String,
@@ -44,6 +47,7 @@ impl Topic {
             confidence: Some("high".to_string()),
             source_context_id: None,
             extracted_at: None,
+            projects: Vec::new(),
             body,
         }
     }

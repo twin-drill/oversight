@@ -32,6 +32,7 @@ fn make_learning(hint: &str, title: &str, summary: &str, tags: &[&str]) -> Learn
         evidence: vec!["test evidence".to_string()],
         tags: tags.iter().map(|s| s.to_string()).collect(),
         confidence: 0.9,
+        project_path: None,
     }
 }
 

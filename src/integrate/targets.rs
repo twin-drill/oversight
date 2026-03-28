@@ -46,10 +46,14 @@ pub struct IntegrationTarget {
 impl IntegrationTarget {
     /// Build the claude-code target definition.
     pub fn claude_code() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let config_dir = std::env::var("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".claude")
+            });
         IntegrationTarget {
             identifier: "claude-code".to_string(),
-            default_path: home.join(".claude").join("CLAUDE.md"),
+            default_path: config_dir.join("CLAUDE.md"),
             rendering_hints: RenderingHints {
                 section_title: "Oversight Knowledge Base".to_string(),
                 instruction_style: InstructionStyle::ClaudeCode,
@@ -68,7 +72,7 @@ impl IntegrationTarget {
                 section_title: "Oversight Knowledge Base".to_string(),
                 instruction_style: InstructionStyle::Generic,
             },
-            install_policy: InstallPolicy::RequireExisting,
+            install_policy: InstallPolicy::CreateIfAbsent,
         }
     }
 

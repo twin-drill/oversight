@@ -1,3 +1,4 @@
+use crate::healing_loop::scrub;
 use crate::source::types::{TurnType, TypedTurn};
 
 /// Maximum lines to keep from verbose tool output.
@@ -5,8 +6,8 @@ const MAX_OUTPUT_LINES: usize = 30;
 
 /// Reduce a set of typed turns into a compact transcript string for LLM extraction.
 ///
-/// This filters to tool-relevant events and truncates verbose output to fit
-/// within a token budget.
+/// This filters to tool-relevant events, scrubs sensitive secrets, and truncates
+/// verbose output to fit within a token budget.
 pub fn reduce_transcript(turns: &[TypedTurn], max_len: usize) -> String {
     let relevant_turns = filter_relevant_turns(turns);
     let mut transcript = String::new();
@@ -27,7 +28,17 @@ pub fn reduce_transcript(turns: &[TypedTurn], max_len: usize) -> String {
         transcript.push('\n');
     }
 
-    transcript
+    scrub::scrub_secrets(&transcript)
+}
+
+/// Collect all user input text from turns (for cross-conversation pattern detection).
+pub fn collect_user_messages(turns: &[TypedTurn]) -> Vec<String> {
+    turns
+        .iter()
+        .filter(|t| t.turn_type() == TurnType::UserInput)
+        .map(|t| scrub::scrub_secrets(&t.text_content()))
+        .filter(|text| !text.trim().is_empty())
+        .collect()
 }
 
 /// Filter turns to tool-relevant events.
