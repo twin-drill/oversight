@@ -3,7 +3,6 @@ use crate::integrate::fs as safe_fs;
 use crate::integrate::markers;
 use crate::integrate::render;
 use crate::integrate::targets::{InstallPolicy, IntegrationTarget};
-use crate::kb::types::TopicSummary;
 use std::path::{Path, PathBuf};
 
 /// Result of an integration operation.
@@ -93,6 +92,43 @@ impl std::fmt::Display for IntegrationStatus {
     }
 }
 
+/// Install a managed block at a specific path.
+///
+/// Creates the file if absent, inserts or replaces the block if present.
+/// Returns a display string describing the action taken.
+pub fn install_block_at(
+    path: &Path,
+    target_id: &str,
+    block: &str,
+) -> Result<IntegrationAction> {
+    let existing = safe_fs::read_if_exists(path)?;
+
+    match existing {
+        Some(content) => {
+            let location = markers::find_block(&content, target_id, &path.display().to_string())?;
+            match location {
+                Some(loc) => {
+                    let new_content = markers::replace_block(&content, &loc, block);
+                    if new_content == content {
+                        return Ok(IntegrationAction::NoChange);
+                    }
+                    safe_fs::write_atomic(path, &new_content)?;
+                    Ok(IntegrationAction::Replaced)
+                }
+                None => {
+                    let new_content = markers::insert_block(&content, block);
+                    safe_fs::write_atomic(path, &new_content)?;
+                    Ok(IntegrationAction::Inserted)
+                }
+            }
+        }
+        None => {
+            safe_fs::write_atomic(path, block)?;
+            Ok(IntegrationAction::Created)
+        }
+    }
+}
+
 /// Install the managed block into a target file.
 ///
 /// If the block already exists, it is replaced (idempotent).
@@ -100,14 +136,12 @@ impl std::fmt::Display for IntegrationStatus {
 pub fn install(
     target: &IntegrationTarget,
     path_override: Option<&Path>,
-    topics: &[TopicSummary],
-    preview_limit: Option<usize>,
     dry_run: bool,
 ) -> Result<IntegrationResult> {
     let path = target.resolve_path(path_override);
     crate::integrate::targets::validate_target_path(&path)?;
 
-    let block = render::render_managed_block(target, topics, preview_limit);
+    let block = render::render_managed_block(target);
     let existing = safe_fs::read_if_exists(&path)?;
 
     match existing {
@@ -190,8 +224,6 @@ pub fn install(
 pub fn refresh(
     target: &IntegrationTarget,
     path_override: Option<&Path>,
-    topics: &[TopicSummary],
-    preview_limit: Option<usize>,
     dry_run: bool,
 ) -> Result<IntegrationResult> {
     let path = target.resolve_path(path_override);
@@ -204,7 +236,7 @@ pub fn refresh(
 
             match location {
                 Some(loc) => {
-                    let block = render::render_managed_block(target, topics, preview_limit);
+                    let block = render::render_managed_block(target);
                     let new_content = markers::replace_block(&content, &loc, &block);
 
                     if new_content == content {
@@ -452,13 +484,13 @@ mod tests {
         let (target, path) = target_at(&dir, "CLAUDE.md");
         let topics = make_topics(&["gh-cli", "aws-sso"]);
 
-        let result = install(&target, None, &topics, None, false).unwrap();
+        let result = install(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::Created);
         assert!(path.exists());
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("oversight:begin target=claude-code"));
-        assert!(content.contains("Current topics: gh-cli, aws-sso"));
+        assert!(content.contains("oversight topics"));
         assert!(content.contains("oversight:end"));
     }
 
@@ -469,15 +501,14 @@ mod tests {
 
         fs::write(&path, "# My Config\n\nExisting content.\n").unwrap();
 
-        let topics = make_topics(&["docker-local"]);
-        let result = install(&target, None, &topics, None, false).unwrap();
+        let result = install(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::Inserted);
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("# My Config"));
         assert!(content.contains("Existing content."));
         assert!(content.contains("oversight:begin target=claude-code"));
-        assert!(content.contains("docker-local"));
+        assert!(content.contains("oversight topics"));
     }
 
     #[test]
@@ -486,10 +517,10 @@ mod tests {
         let (target, path) = target_at(&dir, "CLAUDE.md");
         let topics = make_topics(&["gh-cli"]);
 
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
         let content_after_first = fs::read_to_string(&path).unwrap();
 
-        let result = install(&target, None, &topics, None, false).unwrap();
+        let result = install(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::NoChange);
 
         let content_after_second = fs::read_to_string(&path).unwrap();
@@ -497,22 +528,15 @@ mod tests {
     }
 
     #[test]
-    fn test_install_replaces_existing_block() {
+    fn test_install_is_idempotent_with_static_block() {
         let dir = TempDir::new().unwrap();
         let (target, path) = target_at(&dir, "CLAUDE.md");
 
-        let topics_v1 = make_topics(&["gh-cli"]);
-        install(&target, None, &topics_v1, None, false).unwrap();
+        install(&target, None, false).unwrap();
+        let result = install(&target, None, false).unwrap();
+        assert_eq!(result.action, IntegrationAction::NoChange);
 
-        let topics_v2 = make_topics(&["gh-cli", "aws-sso"]);
-        let result = install(&target, None, &topics_v2, None, false).unwrap();
-        assert_eq!(result.action, IntegrationAction::Replaced);
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("gh-cli, aws-sso"));
-        // Should only have one block
-        assert_eq!(content.matches("oversight:begin").count(), 1);
-        assert_eq!(content.matches("oversight:end").count(), 1);
+        assert_eq!(fs::read_to_string(&path).unwrap().matches("oversight:begin").count(), 1);
     }
 
     #[test]
@@ -521,28 +545,19 @@ mod tests {
         let (target, path) = target_at(&dir, "CLAUDE.md");
         let topics = make_topics(&["gh-cli"]);
 
-        let result = install(&target, None, &topics, None, true).unwrap();
+        let result = install(&target, None, true).unwrap();
         assert!(matches!(result.action, IntegrationAction::DryRun(_)));
         assert!(!path.exists(), "Dry run should not create file");
     }
 
     #[test]
-    fn test_refresh_updates_topics() {
+    fn test_refresh_is_no_change_when_block_unchanged() {
         let dir = TempDir::new().unwrap();
-        let (target, path) = target_at(&dir, "CLAUDE.md");
+        let (target, _path) = target_at(&dir, "CLAUDE.md");
 
-        // Install with original topics
-        let topics_v1 = make_topics(&["gh-cli"]);
-        install(&target, None, &topics_v1, None, false).unwrap();
-
-        // Refresh with new topics
-        let topics_v2 = make_topics(&["gh-cli", "aws-sso", "docker-local"]);
-        let result = refresh(&target, None, &topics_v2, None, false).unwrap();
-        assert_eq!(result.action, IntegrationAction::Replaced);
-
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("gh-cli, aws-sso, docker-local"));
-        assert_eq!(content.matches("oversight:begin").count(), 1);
+        install(&target, None, false).unwrap();
+        let result = refresh(&target, None, false).unwrap();
+        assert_eq!(result.action, IntegrationAction::NoChange);
     }
 
     #[test]
@@ -552,7 +567,7 @@ mod tests {
         fs::write(&path, "# My Config\n").unwrap();
 
         let topics = make_topics(&["gh-cli"]);
-        let result = refresh(&target, None, &topics, None, false).unwrap();
+        let result = refresh(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::NoChange);
 
         // Original content should be unchanged
@@ -565,7 +580,7 @@ mod tests {
         let (target, _path) = target_at(&dir, "CLAUDE.md");
 
         let topics = make_topics(&["gh-cli"]);
-        let result = refresh(&target, None, &topics, None, false).unwrap();
+        let result = refresh(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::NoChange);
     }
 
@@ -576,7 +591,7 @@ mod tests {
 
         fs::write(&path, "# My Config\n\nExisting content.\n").unwrap();
         let topics = make_topics(&["gh-cli"]);
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
 
         let result = remove(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::Removed);
@@ -594,7 +609,7 @@ mod tests {
         let (target, path) = target_at(&dir, "CLAUDE.md");
         let topics = make_topics(&["gh-cli"]);
 
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
         assert!(path.exists());
 
         let result = remove(&target, None, false).unwrap();
@@ -617,7 +632,7 @@ mod tests {
         let (target, path) = target_at(&dir, "CLAUDE.md");
         let topics = make_topics(&["gh-cli"]);
 
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
         assert!(path.exists());
 
         let result = remove(&target, None, true).unwrap();
@@ -642,13 +657,13 @@ mod tests {
         let (target, _path) = target_at(&dir, "CLAUDE.md");
         let topics = make_topics(&["gh-cli", "aws-sso"]);
 
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
 
         let st = status(&target, None);
         assert!(st.installed);
         assert!(st.file_exists);
         assert_eq!(st.marker_health, MarkerHealth::Healthy);
-        assert_eq!(st.topic_count, Some(2));
+        assert!(st.installed);
     }
 
     #[test]
@@ -668,11 +683,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (target, path) = target_at(&dir, "CLAUDE.md");
 
-        let result = install(&target, None, &[], None, false).unwrap();
+        let result = install(&target, None, false).unwrap();
         assert_eq!(result.action, IntegrationAction::Created);
 
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("No topics yet"));
+        assert!(content.contains("oversight topics"));
         assert!(content.contains("oversight:begin"));
     }
 
@@ -685,7 +700,7 @@ mod tests {
         fs::write(&path, original).unwrap();
 
         let topics = make_topics(&["gh-cli"]);
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("# Header"));
@@ -702,7 +717,7 @@ mod tests {
         let custom_path = dir.path().join("custom").join("CLAUDE.md");
         let topics = make_topics(&["gh-cli"]);
 
-        let result = install(&target, Some(&custom_path), &topics, None, false).unwrap();
+        let result = install(&target, Some(&custom_path), false).unwrap();
         assert_eq!(result.path, custom_path);
         assert!(custom_path.exists());
     }
@@ -719,7 +734,7 @@ mod tests {
 
         // Install should create backup
         let topics = make_topics(&["gh-cli"]);
-        install(&target, None, &topics, None, false).unwrap();
+        install(&target, None, false).unwrap();
         assert!(backup_path.exists());
         assert_eq!(fs::read_to_string(&backup_path).unwrap(), "# Original content\n");
     }
@@ -732,7 +747,7 @@ mod tests {
         target.install_policy = InstallPolicy::RequireExisting;
 
         let topics = make_topics(&["gh-cli"]);
-        let err = install(&target, None, &topics, None, false).unwrap_err();
+        let err = install(&target, None, false).unwrap_err();
         assert!(err.to_string().contains("does not exist"));
     }
 

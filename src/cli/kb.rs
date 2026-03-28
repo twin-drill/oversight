@@ -1,6 +1,7 @@
 use crate::cli::integrate::{IntegrateCommands, run_integrate_command};
 use crate::cli::loop_cmd::{LoopCommands, run_loop_command};
 use oversight::config::Config;
+use oversight::integrate::{manager as integrate_manager, render as integrate_render, targets as integrate_targets};
 use oversight::kb::frontmatter;
 use oversight::KBService;
 use oversight::TopicSummary;
@@ -74,6 +75,9 @@ pub enum Commands {
         name: String,
     },
 
+    /// Inject the oversight managed block into the current directory's agent config files
+    Inject,
+
     /// Healing loop commands (discover, extract, merge)
     Loop {
         #[command(subcommand)]
@@ -132,6 +136,7 @@ pub fn run(cli: Cli) -> i32 {
         Commands::Update { name } => cmd_update(&service, &name),
         Commands::Search { query } => cmd_search(&service, &query),
         Commands::Delete { name } => cmd_delete(&service, &name),
+        Commands::Inject => cmd_inject(),
         Commands::Loop { .. } => unreachable!(),
         Commands::Integrate { .. } => unreachable!(),
     }
@@ -305,9 +310,38 @@ fn cmd_delete(service: &KBService, name: &str) -> i32 {
 fn read_stdin() -> io::Result<String> {
     let mut buf = String::new();
     if std::io::stdin().is_terminal() {
-        // If stdin is a TTY, provide guidance
         eprintln!("Enter topic content (Ctrl+D to finish):");
     }
     io::stdin().read_to_string(&mut buf)?;
     Ok(buf)
+}
+
+fn cmd_inject() -> i32 {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: could not determine current directory: {e}");
+            return 1;
+        }
+    };
+
+    let files = ["CLAUDE.md", "AGENTS.md"];
+    let target = integrate_targets::IntegrationTarget::claude_code();
+    let block = integrate_render::render_managed_block(&target);
+    let mut injected = 0;
+
+    for filename in &files {
+        let path = cwd.join(filename);
+        match integrate_manager::install_block_at(&path, &target.identifier, &block) {
+            Ok(action) => {
+                println!("{}: {action}", path.display());
+                injected += 1;
+            }
+            Err(e) => {
+                eprintln!("Error writing {}: {e}", path.display());
+            }
+        }
+    }
+
+    if injected == 0 { 1 } else { 0 }
 }

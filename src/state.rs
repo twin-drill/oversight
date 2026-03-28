@@ -69,6 +69,10 @@ pub struct LoopState {
     /// SHA-256 hashes of previously extracted learnings (for dedup).
     #[serde(default)]
     pub extraction_hashes: HashSet<String>,
+
+    /// SHA-256 hashes of pattern clusters already synthesized.
+    #[serde(default)]
+    pub pattern_hashes: HashSet<String>,
 }
 
 impl LoopState {
@@ -152,6 +156,14 @@ impl LoopState {
         self.extraction_hashes.contains(hash)
     }
 
+    pub fn add_pattern_hash(&mut self, hash: String) {
+        self.pattern_hashes.insert(hash);
+    }
+
+    pub fn pattern_hashes(&self) -> &HashSet<String> {
+        &self.pattern_hashes
+    }
+
     /// Return a summary string for display.
     pub fn summary(&self) -> String {
         let last_poll = self
@@ -159,10 +171,11 @@ impl LoopState {
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "never".to_string());
         format!(
-            "Last poll: {}\nContexts processed: {}\nExtraction hashes: {}",
+            "Last poll: {}\nContexts processed: {}\nExtraction hashes: {}\nPattern hashes: {}",
             last_poll,
             self.processed.len(),
             self.extraction_hashes.len(),
+            self.pattern_hashes.len(),
         )
     }
 

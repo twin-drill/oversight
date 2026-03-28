@@ -25,6 +25,10 @@ impl GeminiSource {
             .join("tmp")
     }
 
+    pub fn root_dir(&self) -> &std::path::Path {
+        &self.tmp_dir
+    }
+
     pub fn discover_candidates(
         &self,
         state: &LoopState,
@@ -57,6 +61,7 @@ impl GeminiSource {
                 context,
                 head_turn_id,
                 source_path: Some(session.path.clone()),
+                    project_path: None,
             });
 
             if candidates.len() >= limit as usize {

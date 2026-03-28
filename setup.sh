@@ -44,6 +44,9 @@ info "Installing oversight to ${INSTALL_DIR}"
 mkdir -p "$INSTALL_DIR"
 cp -f "${REPO_DIR}/target/release/oversight" "$OVERSIGHT_BIN"
 chmod +x "$OVERSIGHT_BIN"
+if is_macos; then
+    codesign -s - -f "$OVERSIGHT_BIN" >/dev/null 2>&1 || true
+fi
 ok "Installed ${OVERSIGHT_BIN}"
 
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
@@ -112,11 +115,39 @@ chmod 600 "$ENV_FILE"
 [ -n "${GEMINI_API_KEY:-}" ]    && echo "GEMINI_API_KEY=${GEMINI_API_KEY}" >> "$ENV_FILE"
 ok "API keys stored in ${ENV_FILE} (mode 600)"
 
-# ─── Step 5: Integrate with Claude Code ──────────────────────────
+# ─── Step 5: Integrate with agent config files ──────────────────
 
-info "Injecting oversight into ~/.claude/CLAUDE.md"
-"$OVERSIGHT_BIN" integrate install --target claude-code
-ok "Managed block installed in CLAUDE.md"
+info "Injecting oversight into agent config files"
+
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+"$OVERSIGHT_BIN" integrate install --target claude-code --path "${CLAUDE_DIR}/CLAUDE.md"
+ok "Managed block installed in ${CLAUDE_DIR}/CLAUDE.md"
+
+CODEX_DIR="${CODEX_HOME:-${HOME}/.codex}"
+OPENCODE_DIR="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}"
+
+# Gemini: check settings.json for custom context filename
+GEMINI_FILE="GEMINI.md"
+GEMINI_SETTINGS="${HOME}/.gemini/settings.json"
+if [ -f "$GEMINI_SETTINGS" ] && command -v python3 >/dev/null 2>&1; then
+    CUSTOM_NAME=$(python3 -c "
+import json, sys
+try:
+    s = json.load(open('$GEMINI_SETTINGS'))
+    fn = s.get('context', {}).get('fileName')
+    if isinstance(fn, str): print(fn)
+    elif isinstance(fn, list) and fn: print(fn[0])
+except: pass
+" 2>/dev/null)
+    [ -n "$CUSTOM_NAME" ] && GEMINI_FILE="$CUSTOM_NAME"
+fi
+
+AGENT_PATHS="${CODEX_DIR}/AGENTS.md ${HOME}/.gemini/${GEMINI_FILE} ${OPENCODE_DIR}/AGENTS.md"
+for AGENTS_PATH in $AGENT_PATHS; do
+    mkdir -p "$(dirname "$AGENTS_PATH")"
+    "$OVERSIGHT_BIN" integrate install --target generic-agents-md --path "$AGENTS_PATH"
+    ok "Managed block installed in ${AGENTS_PATH#$HOME/}"
+done
 
 # ─── Step 6: Install and start healing loop daemon ───────────────
 
@@ -203,6 +234,12 @@ echo "  API keys:          ~/.oversight/env (mode 600)"
 echo "  healing loop:      running as background service"
 echo "  daemon log:        ~/.oversight/daemon.log"
 echo "  CLAUDE.md:         ~/.claude/CLAUDE.md (managed block injected)"
+echo "  AGENTS.md:         ~/.codex/, ~/.gemini/, ~/.config/opencode/ (managed block injected)"
 echo ""
 echo "  The daemon will process your existing sessions over the next few hours."
+echo ""
+echo "  For other agents (Crush, etc.), run this in any project directory"
+echo "  to inject the oversight instructions locally:"
+echo ""
+echo "    cd ~/my-project && oversight inject"
 echo ""

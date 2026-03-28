@@ -104,7 +104,7 @@ fn classify_learning(
     }
 }
 
-/// Find a topic that matches the learning by slug, alias, or tag overlap.
+/// Find a topic that matches the learning by slug, alias, title, or tag similarity.
 fn find_matching_topic<'a>(
     hint_slug: &str,
     learning: &Learning,
@@ -134,7 +134,7 @@ fn find_matching_topic<'a>(
         return Some(topic);
     }
 
-    // 4. Tag overlap (policy-driven thresholds)
+    // 4. Tag overlap with slug affinity (policy-driven thresholds)
     if !learning.tags.is_empty() {
         let learning_tags: std::collections::HashSet<String> = learning
             .tags
@@ -142,15 +142,11 @@ fn find_matching_topic<'a>(
             .map(|t| t.to_lowercase())
             .collect();
 
+        // First pass: tag overlap + slug affinity (stricter)
         for topic in topics {
-            let overlap = topic
-                .tags
-                .iter()
-                .filter(|t| learning_tags.contains(&t.to_lowercase()))
-                .count();
+            let overlap = count_tag_overlap(&learning_tags, &topic.tags);
             if overlap >= policy.tag_overlap_minimum {
                 if policy.require_slug_affinity {
-                    // Additional check: slug should be related
                     if topic.slug.contains(hint_slug) || hint_slug.contains(&topic.slug) {
                         return Some(topic);
                     }
@@ -159,9 +155,46 @@ fn find_matching_topic<'a>(
                 }
             }
         }
+
+        // Second pass: high tag Jaccard similarity (catches semantic duplicates
+        // with different slugs, e.g. "oversight-ledger" vs "sprint-ledger")
+        if policy.tag_jaccard_threshold < 1.0 {
+            let mut best_match: Option<(f64, &Topic)> = None;
+            for topic in topics {
+                if topic.tags.is_empty() {
+                    continue;
+                }
+                let topic_tags: std::collections::HashSet<String> = topic
+                    .tags
+                    .iter()
+                    .map(|t| t.to_lowercase())
+                    .collect();
+                let intersection = learning_tags.intersection(&topic_tags).count();
+                let union = learning_tags.union(&topic_tags).count();
+                if union == 0 {
+                    continue;
+                }
+                let jaccard = intersection as f64 / union as f64;
+                if jaccard >= policy.tag_jaccard_threshold {
+                    if best_match.is_none() || jaccard > best_match.unwrap().0 {
+                        best_match = Some((jaccard, topic));
+                    }
+                }
+            }
+            if let Some((_, topic)) = best_match {
+                return Some(topic);
+            }
+        }
     }
 
     None
+}
+
+fn count_tag_overlap(learning_tags: &std::collections::HashSet<String>, topic_tags: &[String]) -> usize {
+    topic_tags
+        .iter()
+        .filter(|t| learning_tags.contains(&t.to_lowercase()))
+        .count()
 }
 
 /// Match a topic title against the hint using the specified mode.
@@ -252,6 +285,7 @@ mod tests {
             evidence: vec!["test evidence".to_string()],
             tags: tags.iter().map(|s| s.to_string()).collect(),
             confidence: 0.9,
+            project_path: None,
         }
     }
 

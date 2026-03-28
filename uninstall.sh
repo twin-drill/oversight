@@ -8,7 +8,6 @@ set -euo pipefail
 INSTALL_DIR="${HOME}/.local/bin"
 OVERSIGHT_BIN="${INSTALL_DIR}/oversight"
 OVERSIGHT_DIR="${HOME}/.oversight"
-CLAUDE_MD="${HOME}/.claude/CLAUDE.md"
 PLIST_LABEL="com.twin-drill.oversight"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 SYSTEMD_UNIT="oversight.service"
@@ -51,17 +50,28 @@ fi
 
 info "Removing managed blocks from agent configs"
 
-if [ -x "$OVERSIGHT_BIN" ]; then
-    "$OVERSIGHT_BIN" integrate remove --target claude-code 2>/dev/null && \
-        ok "Removed managed block from CLAUDE.md" || \
-        warn "No managed block in CLAUDE.md (or already removed)"
+# Find all files containing oversight markers under known config dirs
+FOUND_FILES=""
+for search_dir in "${CLAUDE_CONFIG_DIR:-${HOME}/.claude}" "${CODEX_HOME:-${HOME}/.codex}" "${HOME}/.gemini" "${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}"; do
+    if [ -d "$search_dir" ]; then
+        while IFS= read -r f; do
+            FOUND_FILES="${FOUND_FILES} ${f}"
+        done < <(grep -rl "oversight:begin" "$search_dir" --include="*.md" 2>/dev/null || true)
+    fi
+done
+
+if [ -z "$FOUND_FILES" ]; then
+    warn "No managed blocks found"
 else
-    for f in "$CLAUDE_MD"; do
-        if [ -f "$f" ] && grep -q "oversight:begin" "$f" 2>/dev/null; then
+    for f in $FOUND_FILES; do
+        if [ -x "$OVERSIGHT_BIN" ]; then
+            "$OVERSIGHT_BIN" integrate remove --target claude-code --path "$f" 2>/dev/null || \
+            "$OVERSIGHT_BIN" integrate remove --target generic-agents-md --path "$f" 2>/dev/null || true
+        else
             sed -i.bak '/<!-- oversight:begin/,/<!-- oversight:end -->/d' "$f"
-            ok "Removed managed block from $f (manual sed)"
             rm -f "$f.bak"
         fi
+        ok "Removed managed block from $f"
     done
 fi
 

@@ -25,6 +25,10 @@ impl ClaudeCodeSource {
             .join("projects")
     }
 
+    pub fn root_dir(&self) -> &std::path::Path {
+        &self.projects_dir
+    }
+
     pub fn discover_candidates(
         &self,
         state: &LoopState,
@@ -59,6 +63,7 @@ impl ClaudeCodeSource {
                 context,
                 head_turn_id,
                 source_path: Some(session.path.clone()),
+                project_path: Some(session.project_name.clone()),
             });
 
             if candidates.len() >= limit as usize {

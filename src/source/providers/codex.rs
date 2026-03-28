@@ -25,6 +25,10 @@ impl CodexSource {
             .join("sessions")
     }
 
+    pub fn root_dir(&self) -> &std::path::Path {
+        &self.sessions_dir
+    }
+
     pub fn discover_candidates(
         &self,
         state: &LoopState,
@@ -57,6 +61,7 @@ impl CodexSource {
                 context,
                 head_turn_id,
                 source_path: Some(session.path.clone()),
+                    project_path: None,
             });
 
             if candidates.len() >= limit as usize {

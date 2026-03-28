@@ -3,11 +3,13 @@ use crate::error::Result;
 use crate::healing_loop::dedupe::{self, MergeOutcome};
 use crate::healing_loop::discovery::Candidate;
 use crate::healing_loop::merge;
+use crate::healing_loop::patterns::{self, PatternResult};
 use crate::healing_loop::policy::DedupePolicy;
 use crate::healing_loop::transcript;
 use crate::kb::service::KBService;
 use crate::llm::client::LlmClient;
 use crate::llm::extractor::{self, Learning};
+use crate::llm::synthesizer;
 use crate::source::TranscriptSource;
 use crate::state::LoopState;
 use chrono::Utc;
@@ -21,6 +23,7 @@ pub struct RunResult {
     pub topics_created: u32,
     pub topics_updated: u32,
     pub duplicates_skipped: u32,
+    pub pattern_result: Option<PatternResult>,
     pub errors: Vec<String>,
 }
 
@@ -35,6 +38,9 @@ impl RunResult {
             self.topics_updated,
             self.duplicates_skipped,
         );
+        if let Some(ref pr) = self.pattern_result {
+            s.push_str(&format!("\n{}", pr.summary()));
+        }
         if !self.errors.is_empty() {
             s.push_str(&format!("\nErrors: {}", self.errors.len()));
             for err in &self.errors {
@@ -90,6 +96,7 @@ impl Runner {
             topics_created: 0,
             topics_updated: 0,
             duplicates_skipped: 0,
+            pattern_result: None,
             errors: Vec::new(),
         };
 
@@ -142,7 +149,9 @@ impl Runner {
             }
         };
 
-        // Phase 2-5: Process each candidate
+        // Phase 2-5: Process each candidate and collect user messages for pattern detection
+        let mut all_user_messages: Vec<patterns::UserMessage> = Vec::new();
+        let mut all_corrections: Vec<patterns::CorrectionSequence> = Vec::new();
         let ctx = ProcessContext {
             source: &source,
             kb: &kb,
@@ -150,6 +159,18 @@ impl Runner {
             policy: &policy,
         };
         for candidate in &candidates {
+            // Collect raw turns for pattern detection before processing
+            if self.config.loop_config.patterns.enabled {
+                if let Ok(turns) = ctx.source.get_turns(candidate).await {
+                    let ctx_id = candidate.context.id();
+                    let project = candidate.project_path.clone();
+                    let msgs = patterns::extract_user_messages(&turns, ctx_id, project.clone());
+                    all_user_messages.extend(msgs);
+                    let corrs = patterns::detect_corrections(&turns, ctx_id, project);
+                    all_corrections.extend(corrs);
+                }
+            }
+
             match self
                 .process_candidate(
                     &ctx,
@@ -176,6 +197,18 @@ impl Runner {
             }
         }
 
+        // Phase 6: Cross-conversation pattern detection
+        if self.config.loop_config.patterns.enabled {
+            let pattern_result = self.run_pattern_detection(
+                &ctx,
+                &mut state,
+                &all_user_messages,
+                &all_corrections,
+                dry_run,
+            ).await;
+            result.pattern_result = Some(pattern_result);
+        }
+
         // Save state
         state.last_poll_at = Some(Utc::now());
         if !dry_run {
@@ -199,6 +232,7 @@ impl Runner {
             topics_created: 0,
             topics_updated: 0,
             duplicates_skipped: 0,
+            pattern_result: None,
             errors: Vec::new(),
         };
 
@@ -218,7 +252,7 @@ impl Runner {
             return Ok(result);
         }
 
-        let reduced = transcript::reduce_transcript(
+        let mut reduced = transcript::reduce_transcript(
             &turns,
             self.config.loop_config.max_transcript_len,
         );
@@ -228,6 +262,10 @@ impl Runner {
                 state.mark_processed(ctx_id, candidate.head_turn_id);
             }
             return Ok(result);
+        }
+
+        if let Some(ref project) = candidate.project_path {
+            reduced = format!("[PROJECT: {project}]\n\n{reduced}");
         }
 
         // Phase 3: Extract learnings via LLM
@@ -242,7 +280,19 @@ impl Runner {
             }
         };
 
-        let extraction = extractor::extract_learnings(llm_client, ctx_id, &reduced, &ctx.policy.regime).await?;
+        // Collect existing tags for the LLM prompt
+        let all_topics = ctx.kb.load_topics()?;
+        let existing_tags: Vec<String> = {
+            let mut tags: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for topic in &all_topics {
+                for tag in &topic.tags {
+                    tags.insert(tag.to_lowercase());
+                }
+            }
+            tags.into_iter().collect()
+        };
+
+        let extraction = extractor::extract_learnings(llm_client, ctx_id, &reduced, &ctx.policy.regime, &existing_tags).await?;
         let learnings = extractor::filter_by_confidence(
             extraction.learnings,
             self.config.loop_config.confidence_threshold,
@@ -255,6 +305,7 @@ impl Runner {
                 let hash = l.content_hash();
                 !state.has_extraction_hash(&hash)
             })
+            .map(|l| l.with_project(candidate.project_path.clone()))
             .collect();
 
         result.learnings_extracted = novel_learnings.len() as u32;
@@ -268,7 +319,6 @@ impl Runner {
         }
 
         // Phase 4: Deduplicate against KB
-        let all_topics = ctx.kb.load_topics()?;
         let outcomes = dedupe::deduplicate(&novel_learnings, &all_topics, ctx.policy);
 
         // Phase 5: Merge or dry-run
@@ -298,6 +348,136 @@ impl Runner {
         }
 
         Ok(result)
+    }
+
+    /// Run cross-conversation pattern detection and synthesis.
+    async fn run_pattern_detection(
+        &self,
+        ctx: &ProcessContext<'_>,
+        state: &mut LoopState,
+        user_messages: &[patterns::UserMessage],
+        corrections: &[patterns::CorrectionSequence],
+        dry_run: bool,
+    ) -> PatternResult {
+        let mut pr = PatternResult::empty();
+        pr.messages_scanned = user_messages.len();
+        pr.corrections_found = corrections.len();
+
+        eprintln!(
+            "Pattern detection: {} messages, {} corrections",
+            user_messages.len(),
+            corrections.len()
+        );
+
+        let pattern_config = &self.config.loop_config.patterns;
+        let clusters = patterns::detect_patterns(
+            user_messages,
+            corrections,
+            pattern_config,
+            state.pattern_hashes(),
+        );
+        pr.clusters_detected = clusters.len();
+
+        if clusters.is_empty() {
+            eprintln!("  No new pattern clusters detected.");
+            return pr;
+        }
+
+        eprintln!("  Found {} pattern cluster(s)", clusters.len());
+        for (i, cluster) in clusters.iter().enumerate() {
+            eprintln!(
+                "  Cluster {}: {} ({} occurrences across {} contexts)",
+                i + 1,
+                cluster.cluster_type,
+                cluster.occurrences.len(),
+                cluster
+                    .occurrences
+                    .iter()
+                    .map(|o| o.context_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+            );
+        }
+
+        let llm_client = match ctx.llm {
+            Some(c) => c,
+            None => {
+                eprintln!("  Skipping pattern synthesis (no LLM client).");
+                return pr;
+            }
+        };
+
+        let all_topics = match ctx.kb.load_topics() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("  Failed to load topics for pattern synthesis: {e}");
+                return pr;
+            }
+        };
+        let existing_tags: Vec<String> = {
+            let mut tags: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for topic in &all_topics {
+                for tag in &topic.tags {
+                    tags.insert(tag.to_lowercase());
+                }
+            }
+            tags.into_iter().collect()
+        };
+
+        let directives = match synthesizer::synthesize_patterns(
+            llm_client,
+            &clusters,
+            &existing_tags,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("  Pattern synthesis failed: {e}");
+                return pr;
+            }
+        };
+
+        pr.clusters_synthesized = directives.len();
+        eprintln!("  Synthesized {} directive(s)", directives.len());
+
+        let learnings: Vec<Learning> = directives
+            .into_iter()
+            .map(|d| d.into_learning())
+            .collect();
+
+        let policy = &ctx.policy;
+        let outcomes = dedupe::deduplicate(&learnings, &all_topics, policy);
+
+        if dry_run {
+            let summary = merge::dry_run_summary(&outcomes);
+            eprintln!("  Pattern directives (dry run):\n{summary}");
+            for outcome in &outcomes {
+                match outcome {
+                    MergeOutcome::CreateTopic { .. } => pr.topics_created += 1,
+                    MergeOutcome::AppendInsight { .. } => pr.topics_updated += 1,
+                    MergeOutcome::NoOpDuplicate { .. } => pr.duplicates_skipped += 1,
+                }
+            }
+        } else {
+            match merge::apply_merges(ctx.kb, &outcomes, 0) {
+                Ok(merge_result) => {
+                    pr.topics_created += merge_result.topics_created;
+                    pr.topics_updated += merge_result.topics_updated;
+                    pr.duplicates_skipped += merge_result.duplicates_skipped;
+                }
+                Err(e) => {
+                    eprintln!("  Failed to merge pattern directives: {e}");
+                    return pr;
+                }
+            }
+
+            for cluster in &clusters {
+                state.add_pattern_hash(cluster.content_hash.clone());
+            }
+        }
+
+        pr
     }
 }
 

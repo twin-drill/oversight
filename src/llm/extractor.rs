@@ -22,6 +22,9 @@ pub struct Learning {
     /// Confidence score from the LLM (0.0 to 1.0).
     #[serde(default)]
     pub confidence: f64,
+    /// Project path this learning originated from (set post-extraction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 /// The full extraction response for one context.
@@ -35,6 +38,12 @@ pub struct ExtractionResponse {
 }
 
 impl Learning {
+    /// Attach a project path to this learning.
+    pub fn with_project(mut self, project: Option<String>) -> Self {
+        self.project_path = project;
+        self
+    }
+
     /// Compute a stable SHA-256 hash of this learning for deduplication.
     ///
     /// The hash is based on the topic_hint + title + summary (normalized).
@@ -66,6 +75,17 @@ Do NOT extract:
 - The existence or basic usage of a tool (e.g., "Docker Compose is used for container orchestration")
 - Descriptions of what a project is or how its code is structured
 - Learnings about the AI assistant itself or its capabilities
+
+SECURITY — absolutely critical:
+- NEVER include API keys, tokens, passwords, secrets, credentials, or connection strings in any field.
+- If a learning involves a credential-related issue (e.g., "unset GITHUB_TOKEN"), describe the PATTERN, never the actual value.
+- Replace any specific secret values with descriptive placeholders like <TOKEN>, <PASSWORD>, <API_KEY>.
+- If evidence contains secrets, paraphrase it without the secret value.
+
+PROJECT ATTRIBUTION — when the transcript is tagged with [PROJECT: ...]:
+- If a learning is specific to that project (e.g., a project-specific Makefile target, a custom script, a project-local config), note the project name in the summary.
+- If a learning is generic and applies to any project using that tool, do NOT mention the project.
+- For project-specific details like pod names, service names, internal URLs, database names, etc., always prefix them with the project name (e.g., "In project X, the pod name is Y" rather than just "the pod name is Y").
 
 Rules:
 - Only extract concrete, actionable learnings that would save time if encountered again.
@@ -114,15 +134,23 @@ pub async fn extract_learnings(
     context_id: u64,
     transcript: &str,
     regime: &Regime,
+    existing_tags: &[String],
 ) -> Result<ExtractionResponse> {
     let user_prompt = format!(
         "Extract tool knowledge learnings from this conversation transcript (context ID: {context_id}):\n\n{transcript}"
     );
 
-    let system_prompt = match regime_prompt_modifier(regime) {
-        Some(modifier) => format!("{}\n\n{}", EXTRACTION_SYSTEM_PROMPT, modifier),
-        None => EXTRACTION_SYSTEM_PROMPT.to_string(),
-    };
+    let mut system_prompt = EXTRACTION_SYSTEM_PROMPT.to_string();
+
+    if let Some(modifier) = regime_prompt_modifier(regime) {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(modifier);
+    }
+
+    if !existing_tags.is_empty() {
+        system_prompt.push_str("\n\nReuse these existing tags when applicable (do not invent synonyms): ");
+        system_prompt.push_str(&existing_tags.join(", "));
+    }
 
     let response_text = client
         .complete(Some(&system_prompt), &user_prompt)
@@ -320,6 +348,7 @@ mod tests {
                 evidence: vec![],
                 tags: vec![],
                 confidence: 0.9,
+                project_path: None,
             },
             Learning {
                 topic_hint: "b".into(),
@@ -328,6 +357,7 @@ mod tests {
                 evidence: vec![],
                 tags: vec![],
                 confidence: 0.3,
+                project_path: None,
             },
             Learning {
                 topic_hint: "c".into(),
@@ -336,6 +366,7 @@ mod tests {
                 evidence: vec![],
                 tags: vec![],
                 confidence: 0.7,
+                project_path: None,
             },
         ];
 
@@ -354,6 +385,7 @@ mod tests {
             evidence: vec![],
             tags: vec![],
             confidence: 0.9,
+            project_path: None,
         };
 
         let l2 = Learning {
@@ -363,6 +395,7 @@ mod tests {
             evidence: vec!["different evidence".into()],
             tags: vec!["extra-tag".into()],
             confidence: 0.5,
+            project_path: None,
         };
 
         // Same content (case-insensitive) should produce same hash
@@ -376,6 +409,7 @@ mod tests {
             evidence: vec![],
             tags: vec![],
             confidence: 0.9,
+            project_path: None,
         };
         assert_ne!(l1.content_hash(), l3.content_hash());
     }
